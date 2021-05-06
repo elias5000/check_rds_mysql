@@ -64,7 +64,7 @@ class DbInstance:
         instance_class_name = self.instance_class_name
         if instance_class_name.startswith('db.'):
             instance_class_name = '.'.join(self.instance_class_name.split('.')[1:])
-        ec2 = boto3.client('ec2')
+        ec2 = boto3.session.Session(region_name=self.region).client('ec2')
         return ec2.describe_instance_types(InstanceTypes=[instance_class_name])['InstanceTypes'][0]
 
     @property
@@ -242,7 +242,7 @@ def unused_connections(args):
     :return:
     """
     instance = DbInstance(args.region, args.instance)
-    connections_metric = Metric(
+    metric = Metric(
         dimensions='DBInstanceIdentifier:{}'.format(args.instance),
         last_state=args.last_state,
         minutes=5,
@@ -252,7 +252,7 @@ def unused_connections(args):
         region=args.region,
         statistics='Minimum'
     )
-    value = instance.max_connections - connections_metric.get_current_value()
+    value = instance.max_connections - metric.get_current_value()
     if args.percent:
         value = value / instance.max_connections * 100
     return value
@@ -265,7 +265,7 @@ def free_storage(args):
     :return:
     """
     instance = DbInstance(args.region, args.instance)
-    connections_metric = Metric(
+    metric = Metric(
         dimensions='DBInstanceIdentifier:{}'.format(args.instance),
         last_state=args.last_state,
         minutes=5,
@@ -275,7 +275,7 @@ def free_storage(args):
         region=args.region,
         statistics='Minimum'
     )
-    value = connections_metric.get_current_value()
+    value = metric.get_current_value()
     if args.percent:
         value = value / instance.storage * 100
     return value
@@ -287,7 +287,7 @@ def cpu_used(args):
     :param args:
     :return:
     """
-    connections_metric = Metric(
+    metric = Metric(
         dimensions='DBInstanceIdentifier:{}'.format(args.instance),
         last_state=args.last_state,
         minutes=5,
@@ -297,7 +297,26 @@ def cpu_used(args):
         region=args.region,
         statistics='Maximum'
     )
-    return connections_metric.get_current_value()
+    return metric.get_current_value()
+
+
+def swap_used(args):
+    """
+    Return swap used
+    :param args:
+    :return:
+    """
+    metric = Metric(
+        dimensions='DBInstanceIdentifier:{}'.format(args.instance),
+        last_state=args.last_state,
+        minutes=5,
+        name='SwapUsage',
+        namespace='RDS',
+        prefix='AWS',
+        region=args.region,
+        statistics='Maximum'
+    )
+    return metric.get_current_value()
 
 
 def expand_unit(value):
@@ -309,18 +328,18 @@ def expand_unit(value):
     if ":" in value:
         return ":".join(str(expand_unit(val)) for val in value.split(':'))
     if value.endswith('K'):
-        return int(value[:-1]) * 1000
-    if value.endswith('Ki'):
-        return int(value[:-2]) * 1024
-    if value.endswith('M'):
-        return int(value[:-1]) * 1000000
-    if value.endswith('Mi'):
-        return int(value[:-2]) * 1048576
-    if value.endswith('G'):
-        return int(value[:-1]) * 1000000000
-    if value.endswith('Gi'):
-        return int(value[:-2]) * 1073741824
-    return value
+        value = int(value[:-1]) * 1000
+    elif value.endswith('Ki'):
+        value = int(value[:-2]) * 1024
+    elif value.endswith('M'):
+        value = int(value[:-1]) * 1000000
+    elif value.endswith('Mi'):
+        value = int(value[:-2]) * 1048576
+    elif value.endswith('G'):
+        value = int(value[:-1]) * 1000000000
+    elif value.endswith('Gi'):
+        value = int(value[:-2]) * 1073741824
+    return str(value)
 
 
 def main():
@@ -341,11 +360,13 @@ thresholds and ranges:
     required.add_argument('--crit-conns', help='free connections critical threshold', required=True)
     required.add_argument('--warn-disk', help='disk free warning threshold', required=True)
     required.add_argument('--crit-disk', help='disk free critical threshold', required=True)
+    required.add_argument('--warn-swap', help='swap used warning threshold', required=True)
+    required.add_argument('--crit-swap', help='swap used critical threshold', required=True)
 
     parser.add_argument('--instance', help='db instance identifier', required=True)
     parser.add_argument('--last_state', help='use last known value', action='store_true')
     parser.add_argument('--percent', help='compare usage percent instead of absolute numbers'
-                                          ' (connections and memory)', action='store_true')
+                                          ' for connections and memory', action='store_true')
     parser.add_argument('--region', help='AWS region name (default: eu-central-1)',
                         default='eu-central-1')
 
@@ -376,6 +397,14 @@ thresholds and ranges:
         'value': value,
         'unit': '%',
     })
+    value = swap_used(args)
+    states.append({
+        'name': 'swap_used',
+        'state': STATE_UNKNOWN if value is None else compare(
+            value, expand_unit(args.warn_swap), expand_unit(args.crit_swap)),
+        'value': value / 1024 / 1024,
+        'unit': 'MiB',
+    })
 
     # determine overall state
     final_state = STATE_OK
@@ -392,7 +421,7 @@ thresholds and ranges:
 
     print(
         final_text,
-        ', '.join(["{}:{}{}".format(item['name'], item['value'], item['unit'])
+        ', '.join(["{}:{:.2f}{}".format(item['name'], item['value'], item['unit'])
                    for item in states])
     )
     sys.exit(final_state)

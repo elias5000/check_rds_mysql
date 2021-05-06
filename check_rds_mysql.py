@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-check_cloudwatch_metric.py
+check_rds_mysql.py
 
 An Icinga/Nagios plug-in to check RDS mysql database health parameters
 

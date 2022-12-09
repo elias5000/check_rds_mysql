@@ -254,8 +254,8 @@ def unused_connections(args):
     )
     value = instance.max_connections - metric.get_current_value()
     if args.percent:
-        value = value / instance.max_connections * 100
-    return value
+        return value / instance.max_connections * 100, 100
+    return value, instance.max_connections
 
 
 def free_storage(args):
@@ -277,8 +277,8 @@ def free_storage(args):
     )
     value = metric.get_current_value()
     if args.percent:
-        value = value / instance.storage * 100
-    return value
+        return value / instance.storage * 100, 100
+    return value, instance.storage
 
 
 def cpu_used(args):
@@ -325,6 +325,8 @@ def expand_unit(value):
     :param value:
     :return:
     """
+    if not isinstance(value, str):
+        return value
     if ":" in value:
         return ":".join(str(expand_unit(val)) for val in value.split(':'))
     if value.endswith('K'):
@@ -372,39 +374,55 @@ thresholds and ranges:
 
     args = parser.parse_args()
     states = []
+    perf_data = []
 
     # gather metrics
-    value = unused_connections(args)
+    value, upper_limit = unused_connections(args)
+    unit = '%' if args.percent else ''
     states.append({
         'name': 'free_connections',
         'state': STATE_UNKNOWN if value is None else compare(value, args.warn_conns,
                                                              args.crit_conns),
-        'value': value,
-        'unit': '%' if args.percent else '',
+        'value': int(value),
+        'unit': unit,
     })
-    value = free_storage(args)
+    perf_data.append(f'free_connections={int(value)}{unit};'
+                     f'{args.warn_conns};{args.crit_conns};'
+                     f'0;{upper_limit}')
+
+    value, upper_limit = free_storage(args)
     states.append({
         'name': 'free_storage',
         'state': STATE_UNKNOWN if value is None else compare(
             value, expand_unit(args.warn_disk), expand_unit(args.crit_disk)),
-        'value': value if args.percent else value / 1024 / 1024,
-        'unit': '%' if args.percent else ' MiB',
+        'value': f'{(value if args.percent else value / 1024 / 1024):.2f}',
+        'unit': '%' if args.percent else 'MiB',
     })
+    perf_data.append(f'free_storage={int(value)}{"%" if args.percent else ""};'
+                     f'{expand_unit(args.warn_disk)};'
+                     f'{expand_unit(args.crit_disk)};'
+                     f'0;{upper_limit}')
+
     value = cpu_used(args)
     states.append({
         'name': 'cpu_used',
         'state': STATE_UNKNOWN if value is None else compare(value, args.warn_cpu, args.crit_cpu),
-        'value': value,
+        'value': f'{value:.2f}',
         'unit': '%',
     })
+    perf_data.append(
+        f'cpu_used={value:.2f}%;{args.warn_cpu};{args.crit_cpu}')
+
     value = swap_used(args)
     states.append({
         'name': 'swap_used',
         'state': STATE_UNKNOWN if value is None else compare(
             value, expand_unit(args.warn_swap), expand_unit(args.crit_swap)),
-        'value': value / 1024 / 1024,
+        'value': f'{(value / 1024 / 1024):.2f}',
         'unit': 'MiB',
     })
+    perf_data.append(f'swap_used={int(expand_unit(value))};'
+                     f'{expand_unit(args.warn_swap)};{expand_unit(args.crit_swap)}')
 
     # determine overall state
     final_state = STATE_OK
@@ -421,8 +439,10 @@ thresholds and ranges:
 
     print(
         final_text,
-        ', '.join(["{}:{:.2f}{}".format(item['name'], item['value'], item['unit'])
-                   for item in states])
+        ', '.join(["{}:{}{}".format(item['name'], item['value'], item['unit'])
+                   for item in states]),
+        '|',
+        ', '.join(perf_data)
     )
     sys.exit(final_state)
 
